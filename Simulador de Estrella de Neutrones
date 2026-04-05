@@ -1,0 +1,54 @@
+🌌 Simulador de Estrella de Neutrones
+
+Este proyecto es una aplicación interactiva desarrollada en React que simula la estructura interna de una estrella de neutrones utilizando una ecuación de estado (EoS) unificada y la integración de las ecuaciones de Tolman–Oppenheimer–Volkoff (TOV).
+
+🚀 Características
+
+Simulación de ecuaciones de estado (EoS)
+
+Integración numérica del modelo TOV
+
+Visualización de:
+
+Presión vs densidad
+
+Perfil radial
+
+Curva masa-radio (M–R)
+
+Interfaz interactiva con sliders para modificar parámetros físicos
+
+Representación gráfica de la estructura interna de la estrella
+
+🧠 Física del modelo
+
+El modelo incluye:
+
+Presión de degeneración de Fermi
+
+Potencial de confinamiento
+
+Correcciones cuánticas (término informacional)
+
+Resolución de las ecuaciones TOV para obtener masa y radio
+
+🛠️ Tecnologías
+
+React
+
+Recharts
+
+JavaScript
+
+▶️ Cómo ejecutar
+
+npm install
+npm run dev
+
+📌 Notas
+
+Este modelo es una aproximación simplificada y no incluye efectos relativistas completos ni ecuaciones de estado avanzadas.
+
+📷 Vista previa
+
+Simulación visual de capas internas y comportamiento físico de una estrella de neutrones.
