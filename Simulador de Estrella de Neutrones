@@ -1,54 +1,122 @@
-🌌 Simulador de Estrella de Neutrones
+# 🌌 Simulador de Estrellas de Neutrones (EoS + TOV)
 
-Este proyecto es una aplicación interactiva desarrollada en React que simula la estructura interna de una estrella de neutrones utilizando una ecuación de estado (EoS) unificada y la integración de las ecuaciones de Tolman–Oppenheimer–Volkoff (TOV).
+Aplicación interactiva desarrollada en React para simular la estructura interna de estrellas de neutrones mediante una ecuación de estado (EoS) unificada y la integración de las ecuaciones de Tolman–Oppenheimer–Volkoff (TOV).
 
-🚀 Características
+---
 
-Simulación de ecuaciones de estado (EoS)
+## 🚀 Características
 
-Integración numérica del modelo TOV
+* 📈 Simulación de ecuaciones de estado (EoS)
+* 🧮 Integración numérica de las ecuaciones TOV
+* 🌠 Visualización interactiva de:
 
-Visualización de:
+  * Presión vs densidad
+  * Perfil radial
+  * Curva masa-radio (M–R)
+* 🎛️ Control de parámetros físicos mediante sliders
+* 🧩 Representación visual de la estructura interna de la estrella
 
-Presión vs densidad
+---
 
-Perfil radial
+## 🧠 Modelo físico
 
-Curva masa-radio (M–R)
+El simulador combina distintos componentes físicos:
 
-Interfaz interactiva con sliders para modificar parámetros físicos
+* **Presión de degeneración de Fermi**
+  Soporte cuántico que evita el colapso gravitacional.
 
-Representación gráfica de la estructura interna de la estrella
+* **Potencial de confinamiento**
+  Modela interacciones nucleares a alta densidad.
 
-🧠 Física del modelo
+* **Correcciones cuánticas**
+  Término adicional basado en gradientes de densidad.
 
-El modelo incluye:
+* **Ecuaciones TOV**
+  Permiten calcular la estructura estelar en relatividad general.
 
-Presión de degeneración de Fermi
+---
 
-Potencial de confinamiento
+## 🛠️ Tecnologías
 
-Correcciones cuánticas (término informacional)
+* React
+* Recharts
+* JavaScript
+* Vite
 
-Resolución de las ecuaciones TOV para obtener masa y radio
+---
 
-🛠️ Tecnologías
+## ▶️ Instalación y ejecución
 
-React
+Clona el repositorio y ejecuta:
 
-Recharts
-
-JavaScript
-
-▶️ Cómo ejecutar
-
+```bash id="a1k9zs"
 npm install
 npm run dev
+```
 
-📌 Notas
+Luego abre tu navegador en:
 
-Este modelo es una aproximación simplificada y no incluye efectos relativistas completos ni ecuaciones de estado avanzadas.
+```
+http://localhost:5173
+```
 
-📷 Vista previa
+---
 
-Simulación visual de capas internas y comportamiento físico de una estrella de neutrones.
+## 📊 Funcionalidades principales
+
+### 🔹 Ecuación de estado (EoS)
+
+Permite visualizar cómo cambia la presión con la densidad bajo diferentes contribuciones físicas.
+
+### 🔹 Perfil radial (TOV)
+
+Muestra cómo varían la presión y la densidad desde el centro hasta la superficie de la estrella.
+
+### 🔹 Curva masa-radio (M–R)
+
+Explora la relación entre masa y radio para distintas densidades centrales.
+
+### 🔹 Visualización de la estrella
+
+Representación gráfica de las capas internas:
+
+* Núcleo
+* Materia de neutrones
+* Corteza interna y externa
+* Atmósfera
+
+---
+
+## 📌 Limitaciones
+
+* Modelo simplificado (no completamente relativista)
+* EoS no incluye transiciones de fase realistas
+* Aproximaciones en densidades extremas
+
+---
+
+## 🌐 Deploy (opcional)
+
+Puedes desplegar este proyecto fácilmente usando:
+
+* Vercel
+* Netlify
+
+---
+
+## 📚 Futuras mejoras
+
+* Implementación de EoS relativista
+* Inclusión de materia de quarks
+* Comparación con datos observacionales reales
+* Mejoras en la visualización
+
+---
+
+## 👨‍💻 Autor abraham hernandez dorantes 
+
+Proyecto desarrollado como simulación física y visualización interactiva.
+
+---
+
+
