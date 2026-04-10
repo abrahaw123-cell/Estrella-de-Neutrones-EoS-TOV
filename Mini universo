@@ -1,0 +1,259 @@
+import pygame
+import numpy as np
+import random
+import math
+
+# -----------------------------
+# CONSTANTES FÍSICAS (NASA)
+# -----------------------------
+
+G = 6.67430e-11
+AU = 1.496e11
+SOLAR_MASS = 1.989e30
+
+WIDTH = 1200
+HEIGHT = 900
+
+TIME_SCALE = 0.0000001
+EXPANSION_RATE = 0.00000001
+
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+clock = pygame.time.Clock()
+
+# -----------------------------
+# CUERPO CELESTE
+# -----------------------------
+
+class Body:
+
+    def __init__(self, x, y, mass):
+
+        self.x = x
+        self.y = y
+        self.mass = mass
+
+        self.vx = random.uniform(-0.01,0.01)
+        self.vy = random.uniform(-0.01,0.01)
+
+    def distance(self, other):
+
+        dx = other.x - self.x
+        dy = other.y - self.y
+
+        return math.sqrt(dx*dx + dy*dy)
+
+    def gravedad(self, other):
+
+        dx = other.x - self.x
+        dy = other.y - self.y
+
+        dist = math.sqrt(dx*dx + dy*dy) + 1e-5
+
+        force = G * self.mass * other.mass / dist**2
+
+        fx = force * dx / dist
+        fy = force * dy / dist
+
+        return fx, fy
+
+# -----------------------------
+# ESTRELLA
+# -----------------------------
+
+class Star(Body):
+
+    def __init__(self,x,y):
+
+        mass = random.uniform(0.5,5)*SOLAR_MASS
+
+        super().__init__(x,y,mass)
+
+        self.planets=[]
+
+        n_planets=random.randint(0,5)
+
+        for i in range(n_planets):
+
+            dist=random.uniform(0.3,5)*AU*0.0000001
+
+            px=x+dist
+            py=y
+
+            self.planets.append(Planet(px,py,self))
+
+# -----------------------------
+# PLANETA
+# -----------------------------
+
+class Planet(Body):
+
+    def __init__(self,x,y,star):
+
+        mass=random.uniform(0.1,5)*5.97e24
+
+        super().__init__(x,y,mass)
+
+        self.star=star
+
+        self.vx=0
+        self.vy=random.uniform(0.002,0.006)
+
+        self.life=False
+
+        if random.random()>0.85:
+            self.life=True
+
+# -----------------------------
+# AGUJERO NEGRO
+# -----------------------------
+
+class BlackHole(Body):
+
+    def __init__(self,x,y):
+
+        mass=1e35
+
+        super().__init__(x,y,mass)
+
+# -----------------------------
+# GALAXIA
+# -----------------------------
+
+class Galaxy:
+
+    def __init__(self,x,y):
+
+        self.x=x
+        self.y=y
+
+        self.stars=[]
+
+        for i in range(random.randint(20,40)):
+
+            sx=x+random.uniform(-200,200)
+            sy=y+random.uniform(-200,200)
+
+            self.stars.append(Star(sx,sy))
+
+        self.blackhole=BlackHole(x,y)
+
+# -----------------------------
+# UNIVERSO
+# -----------------------------
+
+class Universe:
+
+    def __init__(self):
+
+        self.galaxies=[]
+
+        for i in range(3):
+
+            x=random.uniform(200,WIDTH-200)
+            y=random.uniform(200,HEIGHT-200)
+
+            self.galaxies.append(Galaxy(x,y))
+
+    def update(self):
+
+        bodies=[]
+
+        for g in self.galaxies:
+
+            bodies.append(g.blackhole)
+
+            for s in g.stars:
+
+                bodies.append(s)
+
+                for p in s.planets:
+
+                    bodies.append(p)
+
+        for body in bodies:
+
+            fx=0
+            fy=0
+
+            for other in bodies:
+
+                if body==other:
+                    continue
+
+                f=body.gravedad(other)
+
+                fx+=f[0]
+                fy+=f[1]
+
+            body.vx+=fx/body.mass
+            body.vy+=fy/body.mass
+
+        for body in bodies:
+
+            body.x+=body.vx
+            body.y+=body.vy
+
+            body.x*=(1+EXPANSION_RATE)
+            body.y*=(1+EXPANSION_RATE)
+
+# -----------------------------
+# TEORÍA DE CUERDAS (MÓDULO)
+# -----------------------------
+
+def string_dimension_noise(x,y):
+
+    # perturbación dimensional
+    noise=np.sin(x*0.001)*np.cos(y*0.001)
+
+    return noise*0.1
+
+# -----------------------------
+# DIBUJO
+# -----------------------------
+
+def draw_universe(u):
+
+    screen.fill((5,5,15))
+
+    for g in u.galaxies:
+
+        pygame.draw.circle(screen,(200,0,200),(int(g.blackhole.x),int(g.blackhole.y)),6)
+
+        for s in g.stars:
+
+            pygame.draw.circle(screen,(255,255,200),(int(s.x),int(s.y)),2)
+
+            for p in s.planets:
+
+                color=(100,100,255)
+
+                if p.life:
+                    color=(100,255,100)
+
+                pygame.draw.circle(screen,color,(int(p.x),int(p.y)),2)
+
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+
+universe=Universe()
+
+running=True
+
+while running:
+
+    for event in pygame.event.get():
+
+        if event.type==pygame.QUIT:
+            running=False
+
+    universe.update()
+
+    draw_universe(universe)
+
+    pygame.display.flip()
+
+    clock.tick(60)
+
+pygame.quit()
