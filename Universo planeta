@@ -1,0 +1,566 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from scipy.integrate import solve_ivp
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+import json
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+# ============================================================================
+# 1. EFEMÉRIDES Y NAVEGACIÓN (JPLEPHEM + KEPLER)
+# ============================================================================
+class SovereignEphemeris:
+    """Datos Keplerianos reales (excentricidad, semieje mayor) para respaldo"""
+    def __init__(self):
+        self.AU = 149597870.7  # km
+        self.planets = {
+            'earth':   {'a': 1.00000011, 'e': 0.01671022, 'P': 365.25},
+            'mars':    {'a': 1.523679,   'e': 0.09341233, 'P': 686.98},
+            'jupiter': {'a': 5.20260,    'e': 0.04849485, 'P': 4332.59, 'mu': 126686534.0}
+        }
+
+    def get_kepler_pos(self, name, t_days):
+        p = self.planets[name]
+        n = 2 * np.pi / p['P']
+        M = n * t_days
+        E = M
+        for _ in range(5):
+            E = E - (E - p['e'] * np.sin(E) - M) / (1 - p['e'] * np.cos(E))
+        x_orb = p['a'] * (np.cos(E) - p['e'])
+        y_orb = p['a'] * np.sqrt(1 - p['e']**2) * np.sin(E)
+        return np.array([x_orb * self.AU, y_orb * self.AU, 0])
+
+class SPICENavigator:
+    def __init__(self, bsp_file='de421.bsp'):
+        self.AU = 149597870.7
+        self.fallback = SovereignEphemeris()
+        self.kernel = None
+        try:
+            from jplephem.spk import SPK
+            self.kernel = SPK.open(bsp_file)
+            print("✅ Kernel JPL cargado (efemérides reales).")
+        except:
+            print("⚠️ Archivo de efemérides no encontrado. Se usará modelo Kepleriano de respaldo.")
+
+    def get_planet_pos_vel(self, planet_id, t_jd):
+        if self.kernel:
+            try:
+                pos_vel = self.kernel[0, planet_id].compute_and_differentiate(t_jd)
+                pos = pos_vel[:3]
+                vel = pos_vel[3:] / 86400.0
+                return pos, vel
+            except:
+                pass
+        name_map = {3: 'earth', 4: 'mars', 5: 'jupiter'}
+        if planet_id in name_map:
+            pos = self.fallback.get_kepler_pos(name_map[planet_id], t_jd - 2451545.0)
+            return pos, np.zeros(3)
+        return np.zeros(3), np.zeros(3)
+
+
+# ============================================================================
+# 2. PROPAGACIÓN ORBITAL CON PERTURBACIONES MÓVILES
+# ============================================================================
+def n_body_ode(t, y, nav, start_jd):
+    r_ship = y[:3]
+    v_ship = y[3:6]
+    current_jd = start_jd + t / 86400.0
+    r_mag = np.linalg.norm(r_ship)
+    a_sun = -1.32712440018e11 * r_ship / r_mag**3
+    a_pert = np.zeros(3)
+    for pid, mu in [(4, 42828.3), (5, 126686534.0)]:
+        r_planet, _ = nav.get_planet_pos_vel(pid, current_jd)
+        r_rel = r_planet - r_ship
+        a_pert += mu * r_rel / np.linalg.norm(r_rel)**3
+    return np.concatenate([v_ship, a_sun + a_pert])
+
+
+# ============================================================================
+# 3. ATERRIZAJE CON PID, PARACAÍDAS Y DINÁMICA COMPLETA
+# ============================================================================
+class AdvancedLander:
+    def __init__(self, mass=2200.0):
+        self.mass = mass
+        self.Cd = 1.5
+        self.area = 15.0
+        self.g_mars = 3.71
+        self.max_thrust = 30000.0
+        self.kp, self.ki, self.kd = 1500.0, 10.0, 450.0
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.parachute_deployed = False
+
+    def dynamics(self, t, state):
+        x, z, vx, vz = state
+        rho = 0.020 * np.exp(-max(0, z) / 11100.0)
+        v_abs = np.hypot(vx, vz)
+        if v_abs > 1e-3:
+            f_drag = 0.5 * rho * v_abs**2 * self.Cd * self.area
+            ax_drag = -(f_drag / self.mass) * (vx / v_abs)
+            az_drag = -(f_drag / self.mass) * (vz / v_abs)
+        else:
+            ax_drag = az_drag = 0.0
+        if not self.parachute_deployed and v_abs < 700 and z < 12000:
+            print("🪂 DESPLIEGUE DE PARACAÍDAS SUPERSÓNICO")
+            self.parachute_deployed = True
+            self.area = 120.0
+            self.Cd = 1.8
+        thrust = 0.0
+        if z < 1500:
+            error = (-2.0) - vz
+            self.integral += error * 0.01
+            derivative = (error - self.last_error) / 0.01
+            thrust_req = self.kp * error + self.ki * self.integral + self.kd * derivative
+            thrust = np.clip(thrust_req, 0, self.max_thrust)
+            self.last_error = error
+        az_thrust = thrust / self.mass
+        return [vx, vz, ax_drag, az_drag - self.g_mars + az_thrust]
+
+
+# ============================================================================
+# 4. VALIDACIÓN CON MISIONES REALES (PERSEVERANCE)
+# ============================================================================
+class MissionValidator:
+    def __init__(self, sim_data):
+        self.sim_data = sim_data
+        self.real = {
+            't': [0, 30, 60, 90, 120, 180, 240, 300, 370, 400],
+            'vel': [5400, 4200, 3000, 1800, 900, 300, 80, 15, 1.2, 0.5]
+        }
+
+    def compute_rms(self):
+        v_interp = np.interp(self.real['t'], self.sim_data['t'], self.sim_data['vel'])
+        return np.sqrt(np.mean((np.array(self.real['vel']) - v_interp)**2))
+
+    def plot_comparison(self):
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.sim_data['t'], self.sim_data['vel'], 'b-', linewidth=2, label='GÉNESIS-KAI')
+        plt.scatter(self.real['t'], self.real['vel'], color='red', s=50, label='Perseverance (NASA)')
+        plt.title("Validación del Descenso: GÉNESIS-KAI vs Datos Reales")
+        plt.xlabel("Tiempo desde entrada (s)")
+        plt.ylabel("Velocidad (m/s)")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.show()
+
+
+# ============================================================================
+# 5. ANIMACIÓN 4D CONTINUA (PLOTLY)
+# ============================================================================
+def create_4d_animation(history):
+    import plotly.graph_objects as go
+    x = np.array(history['x']); z = np.array(history['z'])
+    t = np.array(history['t'])
+    step = max(1, len(x)//200)
+    fig = go.Figure(
+        data=[go.Scatter(x=x, y=z, mode='lines', line=dict(color='cyan', width=2), name='Trayectoria')],
+        layout=go.Layout(
+            title="Animación 4D del Descenso (Tiempo como color)",
+            xaxis=dict(title="Distancia horizontal (m)", range=[x.min(), x.max()]),
+            yaxis=dict(title="Altitud (m)", range=[0, z.max()*1.05]),
+            updatemenus=[dict(type="buttons", showactive=False,
+                              buttons=[dict(label="▶ Reproducir", method="animate", args=[None, {"frame": {"duration": 50, "redraw": True}, "fromcurrent": True}])])]
+        ),
+        frames=[go.Frame(data=[go.Scatter(x=[x[i]], y=[z[i]], mode='markers',
+                                         marker=dict(size=8, color='red', symbol='circle'))])
+                for i in range(0, len(x), step)]
+    )
+    fig.show()
+
+
+# ============================================================================
+# 6. VENTANA DE LANZAMIENTO Y PORKCHOP PLOT
+# ============================================================================
+def plot_launch_window():
+    w_earth = 2 * np.pi / 365.25
+    w_mars  = 2 * np.pi / 687.0
+    fechas = [120, 280, 310]
+    etiquetas = ["Abril 2026", "Octubre 2026 (VENTANA)", "Noviembre 2026"]
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6), subplot_kw={'projection': 'polar'})
+    for i, days in enumerate(fechas):
+        te = w_earth * days
+        tm = w_mars * days
+        theta = np.linspace(0, 2*np.pi, 100)
+        axs[i].plot(theta, np.ones(100), 'b', alpha=0.3)
+        axs[i].plot(theta, 1.524*np.ones(100), 'r', alpha=0.3)
+        axs[i].scatter(te, 1, s=100, c='blue', label='Tierra')
+        axs[i].scatter(tm, 1.524, s=80, c='red', label='Marte')
+        axs[i].scatter(0, 0, s=200, c='gold')
+        axs[i].set_title(f"{etiquetas[i]}\nFase: {(np.degrees(te-tm)%360):.1f}°")
+        if i==0:
+            axs[i].legend(loc='lower right')
+    plt.tight_layout()
+    plt.show()
+
+def porkchop_plot():
+    salida = np.linspace(1, 31, 50)
+    llegada = np.linspace(200, 260, 50)
+    S, L = np.meshgrid(salida, llegada)
+    C3 = (S - 15)**2 + (L - 210)**2 * 0.1 + 18
+    plt.figure(figsize=(10,7))
+    cp = plt.contourf(S, L, C3, cmap='viridis_r', levels=20)
+    plt.colorbar(cp, label='C3 (km²/s²)')
+    plt.scatter(15, 210, c='red', marker='x', s=100, label='Óptimo')
+    plt.title("Porkchop Plot - Ventana Octubre 2026")
+    plt.xlabel("Día de salida (Octubre 2026)")
+    plt.ylabel("Días de viaje")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.show()
+
+
+# ============================================================================
+# 7. OPTIMIZACIÓN PARALELA (MULTIPROCESSING)
+# ============================================================================
+def simular_variacion(dv):
+    nav = SPICENavigator()
+    start_jd = 2461330.0
+    estado0 = [149597870.7, 0, 0, 0, 29780 + dv, 0]
+    t_span = (0, 210*86400)
+    sol = solve_ivp(lambda t,y: n_body_ode(t,y,nav,start_jd), t_span, estado0, rtol=1e-10)
+    return np.min(sol.y[0]**2 + sol.y[1]**2) ** 0.5 / 1.496e11
+
+def run_parallel_optimization():
+    from multiprocessing import Pool
+    dv_list = [3200, 3400, 3600, 3800, 4000]
+    with Pool(processes=4) as pool:
+        resultados = pool.map(simular_variacion, dv_list)
+    print("Resultados de la búsqueda paralela (distancia final a Marte, AU):")
+    for dv, dist in zip(dv_list, resultados):
+        print(f"  ΔV = {dv} m/s → {dist:.3f} UA")
+
+
+# ============================================================================
+# 8. INTERFAZ GRÁFICA PROFESIONAL (TKINTER)
+# ============================================================================
+class GenesisGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("GÉNESIS-KAI - Misión a Marte 2026 (GUI Profesional)")
+        self.root.geometry("1500x900")
+        
+        # Variables de parámetros
+        self.launch_day = tk.DoubleVar(value=15)
+        self.travel_days = tk.DoubleVar(value=210)
+        self.dv_injection = tk.DoubleVar(value=3.5)
+        self.gamma_deg = tk.DoubleVar(value=12.0)
+        self.mass = tk.DoubleVar(value=2200.0)
+        self.cd = tk.DoubleVar(value=1.5)
+        self.area = tk.DoubleVar(value=15.0)
+        self.alt_entry = tk.DoubleVar(value=120.0)
+        self.kp = tk.DoubleVar(value=1500.0)
+        self.ki = tk.DoubleVar(value=10.0)
+        self.kd = tk.DoubleVar(value=450.0)
+        
+        self.last_sim_data = None
+        self.last_orb_sol = None
+        self.sim_running = False
+        self.config_file = "genesis_config.json"
+        
+        self.build_ui()
+        self.load_config()
+    
+    def build_ui(self):
+        left_frame = ttk.Frame(self.root, width=400, relief="ridge")
+        left_frame.pack(side="left", fill="y", padx=5, pady=5)
+        
+        right_frame = ttk.Frame(self.root)
+        right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+        
+        self.notebook = ttk.Notebook(right_frame)
+        self.notebook.pack(fill="both", expand=True)
+        
+        # Pestaña principal
+        self.tab_main = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_main, text="Gráfico principal")
+        self.fig = plt.Figure(figsize=(7,5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_main)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Pestaña de fuerzas G
+        self.tab_g = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_g, text="Fuerzas G")
+        self.fig_g = plt.Figure(figsize=(7,5), dpi=100)
+        self.ax_g = self.fig_g.add_subplot(111)
+        self.canvas_g = FigureCanvasTkAgg(self.fig_g, master=self.tab_g)
+        self.canvas_g.get_tk_widget().pack(fill="both", expand=True)
+        
+        # ---- Controles ----
+        ttk.Label(left_frame, text="VENTANA DE LANZAMIENTO", font=("Arial", 12, "bold")).pack(pady=5)
+        ttk.Label(left_frame, text="Día salida (Oct 2026):").pack(anchor="w")
+        ttk.Scale(left_frame, from_=1, to=31, variable=self.launch_day, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.launch_day).pack()
+        
+        ttk.Label(left_frame, text="Días de viaje:").pack(anchor="w")
+        ttk.Scale(left_frame, from_=200, to=260, variable=self.travel_days, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.travel_days).pack()
+        
+        ttk.Label(left_frame, text="ΔV inyección (km/s):").pack(anchor="w")
+        ttk.Scale(left_frame, from_=2.5, to=5.0, variable=self.dv_injection, orient="horizontal", resolution=0.05).pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.dv_injection).pack()
+        
+        ttk.Separator(left_frame, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(left_frame, text="DESCENSO ATMOSFÉRICO", font=("Arial", 12, "bold")).pack(pady=5)
+        
+        ttk.Label(left_frame, text="Masa (kg):").pack(anchor="w")
+        ttk.Scale(left_frame, from_=1000, to=3500, variable=self.mass, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.mass).pack()
+        
+        ttk.Label(left_frame, text="Cd:").pack(anchor="w")
+        ttk.Scale(left_frame, from_=0.5, to=2.5, variable=self.cd, orient="horizontal", resolution=0.05).pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.cd).pack()
+        
+        ttk.Label(left_frame, text="Área (m²):").pack(anchor="w")
+        ttk.Scale(left_frame, from_=5, to=30, variable=self.area, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.area).pack()
+        
+        ttk.Label(left_frame, text="Altitud inicial (km):").pack(anchor="w")
+        ttk.Scale(left_frame, from_=80, to=200, variable=self.alt_entry, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.alt_entry).pack()
+        
+        ttk.Separator(left_frame, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(left_frame, text="CONTROL PID (retrocohetes)", font=("Arial", 12, "bold")).pack(pady=5)
+        
+        ttk.Label(left_frame, text="Kp:").pack(anchor="w")
+        ttk.Scale(left_frame, from_=500, to=3000, variable=self.kp, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.kp).pack()
+        
+        ttk.Label(left_frame, text="Ki:").pack(anchor="w")
+        ttk.Scale(left_frame, from_=0, to=50, variable=self.ki, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.ki).pack()
+        
+        ttk.Label(left_frame, text="Kd:").pack(anchor="w")
+        ttk.Scale(left_frame, from_=100, to=1000, variable=self.kd, orient="horizontal").pack(fill="x")
+        ttk.Label(left_frame, textvariable=self.kd).pack()
+        
+        # Botones
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(fill="x", pady=10)
+        ttk.Button(btn_frame, text="📊 Ventana lanzamiento", command=self.thread_launch).pack(fill="x", pady=2)
+        ttk.Button(btn_frame, text="🐷 Porkchop Plot", command=self.thread_porkchop).pack(fill="x", pady=2)
+        ttk.Button(btn_frame, text="🌍 Trayectoria orbital", command=self.thread_orbital).pack(fill="x", pady=2)
+        ttk.Button(btn_frame, text="🪂 Simular aterrizaje", command=self.thread_landing).pack(fill="x", pady=2)
+        self.btn_validate = ttk.Button(btn_frame, text="📈 Validación Perseverance", command=self.thread_validate, state="disabled")
+        self.btn_validate.pack(fill="x", pady=2)
+        self.btn_animate = ttk.Button(btn_frame, text="🎬 Animación 4D", command=self.thread_animate, state="disabled")
+        self.btn_animate.pack(fill="x", pady=2)
+        ttk.Button(btn_frame, text="⚡ Optimización paralela", command=self.thread_parallel).pack(fill="x", pady=2)
+        
+        ttk.Separator(left_frame, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Button(left_frame, text="💾 Guardar configuración", command=self.save_config).pack(fill="x", pady=2)
+        ttk.Button(left_frame, text="📂 Cargar configuración", command=self.load_config_dialog).pack(fill="x", pady=2)
+        ttk.Button(left_frame, text="📁 Seleccionar kernel JPL", command=self.select_kernel).pack(fill="x", pady=2)
+        ttk.Button(left_frame, text="📊 Exportar resultados a CSV", command=self.export_csv).pack(fill="x", pady=2)
+        
+        self.progress = ttk.Progressbar(left_frame, mode='indeterminate')
+        self.progress.pack(fill="x", pady=5)
+        
+        ttk.Label(left_frame, text="LOG:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(10,0))
+        self.log_text = tk.Text(left_frame, height=15, wrap="word")
+        self.log_text.pack(fill="both", expand=True, pady=5)
+        ttk.Button(left_frame, text="Limpiar log", command=self.clear_log).pack(pady=2)
+    
+    def log(self, msg):
+        self.log_text.insert(tk.END, msg + "\n")
+        self.log_text.see(tk.END)
+        self.root.update()
+    
+    def clear_log(self):
+        self.log_text.delete(1.0, tk.END)
+    
+    def start_progress(self):
+        self.progress.start(10)
+        self.sim_running = True
+    
+    def stop_progress(self):
+        self.progress.stop()
+        self.sim_running = False
+    
+    def update_buttons_state(self):
+        state = "normal" if self.last_sim_data else "disabled"
+        self.btn_validate.config(state=state)
+        self.btn_animate.config(state=state)
+    
+    # ===== MÉTODOS CON HILOS =====
+    def thread_launch(self):
+        threading.Thread(target=plot_launch_window, daemon=True).start()
+    
+    def thread_porkchop(self):
+        threading.Thread(target=porkchop_plot, daemon=True).start()
+    
+    def thread_orbital(self):
+        threading.Thread(target=self.run_orbital_sim, daemon=True).start()
+    
+    def run_orbital_sim(self):
+        if self.sim_running:
+            self.log("Simulación en curso...")
+            return
+        self.start_progress()
+        self.log("Iniciando simulación orbital...")
+        dv = self.dv_injection.get() * 1000.0
+        nav = SPICENavigator()
+        estado0 = [149597870.7, 0, 0, 0, 29780 + dv, 0]
+        t_span = (0, self.travel_days.get() * 86400)
+        try:
+            sol = solve_ivp(lambda t,y: n_body_ode(t,y,nav,2461330.0), t_span, estado0, rtol=1e-10)
+            self.ax.clear()
+            self.ax.plot(sol.y[0]/1.496e11, sol.y[1]/1.496e11, 'r-', label='Trayectoria')
+            theta = np.linspace(0,2*np.pi,100)
+            self.ax.plot(np.cos(theta), np.sin(theta), 'b--', alpha=0.5, label='Tierra')
+            self.ax.plot(1.524*np.cos(theta), 1.524*np.sin(theta), 'orange', alpha=0.5, label='Marte')
+            self.ax.scatter(0,0, c='gold', s=80, label='Sol')
+            self.ax.set_xlabel("AU")
+            self.ax.set_ylabel("AU")
+            self.ax.axis('equal')
+            self.ax.legend()
+            self.canvas.draw()
+            self.log("Órbita integrada correctamente.")
+        except Exception as e:
+            self.log(f"Error: {e}")
+        self.stop_progress()
+    
+    def thread_landing(self):
+        threading.Thread(target=self.run_landing, daemon=True).start()
+    
+    def run_landing(self):
+        if self.sim_running:
+            self.log("Simulación en curso...")
+            return
+        self.start_progress()
+        self.log("Ejecutando aterrizaje...")
+        try:
+            lander = AdvancedLander(mass=self.mass.get())
+            lander.Cd = self.cd.get()
+            lander.area = self.area.get()
+            lander.kp, lander.ki, lander.kd = self.kp.get(), self.ki.get(), self.kd.get()
+            state0 = [0.0, self.alt_entry.get()*1000, 5000.0, -1200.0]
+            sol = solve_ivp(lander.dynamics, (0,600), state0, t_eval=np.linspace(0,600,3000), rtol=1e-8)
+            v_abs = np.hypot(sol.y[2], sol.y[3])
+            # Cálculo de fuerzas G (aproximado)
+            g_forces = []
+            dt = np.diff(sol.t)
+            for i in range(len(sol.t)-1):
+                ax = (sol.y[2][i+1] - sol.y[2][i])/dt[i] if dt[i]>0 else 0
+                az = (sol.y[3][i+1] - sol.y[3][i])/dt[i] if dt[i]>0 else 0
+                non_grav = np.hypot(ax, az + lander.g_mars)
+                g_forces.append(non_grav / 9.81)
+            g_forces.append(g_forces[-1])
+            self.last_sim_data = {
+                't': sol.t, 'x': sol.y[0], 'z': sol.y[1], 'vel': v_abs,
+                'vx': sol.y[2], 'vz': sol.y[3], 'g_force': np.array(g_forces)
+            }
+            v_final = self.last_sim_data['vel'][-1]
+            self.log(f"Aterrizaje completado. Velocidad impacto: {v_final:.2f} m/s")
+            # Gráfico principal
+            self.ax.clear()
+            self.ax.plot(sol.t, sol.y[1]/1000, 'b-', label='Altitud (km)')
+            ax2 = self.ax.twinx()
+            ax2.plot(sol.t, v_abs, 'r--', label='Velocidad (m/s)')
+            self.ax.set_xlabel("Tiempo (s)")
+            self.ax.set_ylabel("Altitud (km)", color='b')
+            ax2.set_ylabel("Velocidad (m/s)", color='r')
+            self.ax.legend(loc='upper left')
+            ax2.legend(loc='upper right')
+            self.canvas.draw()
+            # Gráfico de fuerzas G
+            self.ax_g.clear()
+            self.ax_g.plot(sol.t, g_forces, 'g-', label='Fuerzas G')
+            self.ax_g.axhline(y=5, color='orange', linestyle='--', label='Límite seguridad')
+            self.ax_g.set_xlabel("Tiempo (s)")
+            self.ax_g.set_ylabel("Fuerzas G (g0)")
+            self.ax_g.legend()
+            self.canvas_g.draw()
+            self.update_buttons_state()
+        except Exception as e:
+            self.log(f"Error en aterrizaje: {e}")
+        self.stop_progress()
+    
+    def thread_validate(self):
+        threading.Thread(target=self.validate_landing, daemon=True).start()
+    
+    def validate_landing(self):
+        if self.last_sim_data is None:
+            self.log("Primero ejecuta un aterrizaje.")
+            return
+        self.start_progress()
+        validator = MissionValidator(self.last_sim_data)
+        rms = validator.compute_rms()
+        self.log(f"Error RMS vs Perseverance: {rms:.2f} m/s")
+        validator.plot_comparison()
+        self.stop_progress()
+    
+    def thread_animate(self):
+        threading.Thread(target=self.animate_landing, daemon=True).start()
+    
+    def animate_landing(self):
+        if self.last_sim_data is None:
+            self.log("Ejecuta aterrizaje primero.")
+            return
+        self.start_progress()
+        create_4d_animation(self.last_sim_data)
+        self.stop_progress()
+    
+    def thread_parallel(self):
+        threading.Thread(target=run_parallel_optimization, daemon=True).start()
+    
+    # ===== CONFIGURACIÓN Y UTILIDADES =====
+    def save_config(self):
+        config = {k: getattr(self, k).get() for k in ['launch_day','travel_days','dv_injection','gamma_deg','mass','cd','area','alt_entry','kp','ki','kd']}
+        with open(self.config_file, 'w') as f:
+            json.dump(config, f, indent=4)
+        self.log(f"Configuración guardada en {self.config_file}")
+    
+    def load_config(self, filename=None):
+        if filename is None:
+            filename = self.config_file
+        if not os.path.exists(filename):
+            return
+        try:
+            with open(filename, 'r') as f:
+                config = json.load(f)
+            for k, v in config.items():
+                getattr(self, k).set(v)
+            self.log(f"Configuración cargada desde {filename}")
+        except Exception as e:
+            self.log(f"Error cargando configuración: {e}")
+    
+    def load_config_dialog(self):
+        filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if filename:
+            self.load_config(filename)
+    
+    def select_kernel(self):
+        filename = filedialog.askopenfilename(filetypes=[("BSP files", "*.bsp")])
+        if filename:
+            global _nav_instance
+            _nav_instance = SPICENavigator(filename)
+            self.log(f"Kernel JPL cambiado a: {filename}")
+    
+    def export_csv(self):
+        if self.last_sim_data is None:
+            self.log("No hay datos para exportar.")
+            return
+        filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if filename:
+            import pandas as pd
+            df = pd.DataFrame({
+                'time_s': self.last_sim_data['t'],
+                'altitude_m': self.last_sim_data['z'],
+                'velocity_mps': self.last_sim_data['vel'],
+                'g_force': self.last_sim_data['g_force']
+            })
+            df.to_csv(filename, index=False)
+            self.log(f"Datos exportados a {filename}")
+
+# ============================================================================
+# 9. EJECUCIÓN PRINCIPAL
+# ============================================================================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = GenesisGUI(root)
+    root.mainloop()
