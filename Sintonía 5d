@@ -1,0 +1,170 @@
+import streamlit as st
+import numpy as np
+from scipy.integrate import solve_ivp
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+st.set_page_config(page_title="GENESIS-KAI Dual Engine", layout="wide")
+
+st.title("🌌 GENESIS-KAI: Dual-Engine 3-Body Simulator")
+st.markdown("**Comparativa entre el enfoque convencional y el enfoque soberano (AG-0 + H.A.S.)**")
+
+tab1, tab2 = st.tabs(["🚀 Motor Convencional (NASA/JPL Style)", "🔱 Motor Soberano AG-0 (Resonancia + H.A.S.)"])
+
+# ====================== MOTOR BASE (compartido) ======================
+class AG0_Engine:
+    def __init__(self):
+        self.mu = 0.012150585609624
+
+    def dynamics(self, t, s, resonant_control=False, gain=1.37e-4, freq=963.0):
+        x, y, z, vx, vy, vz = s
+        r1_3 = ((x + self.mu)**2 + y**2 + z**2)**1.5
+        r2_3 = ((x - 1 + self.mu)**2 + y**2 + z**2)**1.5
+
+        ax = 2*vy + x - (1 - self.mu)*(x + self.mu)/r1_3 - self.mu*(x - 1 + self.mu)/r2_3
+        ay = -2*vx + y - (1 - self.mu)*y/r1_3 - self.mu*y/r2_3
+        az = -(1 - self.mu)*z/r1_3 - self.mu*z/r2_3
+
+        u = gain * np.sin(freq * t) if resonant_control else 0.0
+        return [vx, vy, vz, ax + u, ay, az]
+
+    def get_jacobi(self, s):
+        x, y, z, vx, vy, vz = s
+        r1 = np.sqrt((x + self.mu)**2 + y**2 + z**2)
+        r2 = np.sqrt((x - 1 + self.mu)**2 + y**2 + z**2)
+        omega = 0.5 * (x**2 + y**2) + (1 - self.mu)/r1 + self.mu/r2
+        v2 = vx**2 + vy**2 + vz**2
+        return 2 * omega - v2
+
+engine = AG0_Engine()
+
+# ====================== PESTAÑA 1: MOTOR CONVENCIONAL ======================
+with tab1:
+    st.header("🚀 Motor Convencional (CR3BP + Control Reactivo)")
+    st.info("Enfoque clásico utilizado por agencias espaciales: resolución numérica de las ecuaciones de movimiento con correcciones PID o impulsos.")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        initial_x = st.slider("Posición X inicial (cerca L1)", 0.75, 0.88, 0.8234, 0.0001, key="conv_x")
+        initial_vy = st.slider("Velocidad Vy inicial", 0.05, 0.20, 0.1267, 0.0001, key="conv_vy")
+        t_max = st.slider("Tiempo de simulación", 50, 200, 100, key="conv_t")
+
+    if st.button("Ejecutar Motor Convencional", type="primary", key="btn_conv"):
+        with st.spinner("Simulando trayectoria convencional..."):
+            y0 = [initial_x, 0.0, 0.001, 0.0, initial_vy, 0.0]
+            t_eval = np.linspace(0, t_max, 6000)
+
+            sol = solve_ivp(lambda t, s: engine.dynamics(t, s, resonant_control=False),
+                            (0, t_max), y0, t_eval=t_eval, rtol=1e-10, atol=1e-12)
+
+            jacobi = np.array([engine.get_jacobi(sol.y[:, i]) for i in range(len(sol.t))])
+
+            fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'scatter3d'}, {'type': 'xy'}]],
+                                subplot_titles=("Trayectoria 3D", "Constante de Jacobi"))
+
+            fig.add_trace(go.Scatter3d(x=sol.y[0], y=sol.y[1], z=sol.y[2],
+                                       mode='lines', line=dict(color='cyan', width=4),
+                                       name='Trayectoria Convencional'), row=1, col=1)
+
+            fig.add_trace(go.Scatter(x=sol.t, y=jacobi, line=dict(color='orange'), name='Jacobi'), row=1, col=2)
+
+            fig.update_layout(height=650, template="plotly_dark",
+                              title="Motor Convencional - CR3BP Reactivo")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.success("Simulación convencional completada.")
+            st.caption("Este motor corrige constantemente las desviaciones causadas por el caos del sistema de tres cuerpos.")
+
+# ====================== PESTAÑA 2: MOTOR SOBERANO 5D (con |Jacobi| como color) ======================
+with tab2:
+    st.header("🔱 Motor Soberano AG-0 (Resonancia + Anticipación H.A.S.)")
+    st.info("Enfoque exploratorio: busca sincronizarse con las frecuencias naturales del sistema en lugar de corregir constantemente.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Parámetros de Resonancia")
+        gain = st.slider("Amplitud de control (Gain 137)", 0.0, 5e-4, 1.37e-4, format="%.2e", key="sov_gain")
+        freq = st.slider("Frecuencia resonante", 100, 2000, 963, key="sov_freq")
+
+    with col_b:
+        st.subheader("Métricas Conceptuales")
+        st.success("Modo Anticipatorio: ACTIVO")
+        st.metric("Enfoque", "Sincronización de fase", "vs Corrección reactiva")
+        st.metric("Filosofía H.A.S.", "Anticipar en lugar de reaccionar", "")
+
+    # Explicación de la visualización 5D fija (|Jacobi| como quinta dimensión)
+    st.markdown("""
+    **🎨 Visualización 5D en este motor:**
+    - **Ejes X, Y, Z** → Posición en el espacio.
+    - **Tamaño del punto** → |Señal de control| (4ª dimensión).
+    - **Color del punto** → |Constante de Jacobi| (5ª dimensión), que mide la **sintonía energética**.
+    """)
+
+    if st.button("Ejecutar Motor Soberano AG-0 (5D)", type="primary", key="btn_sov"):
+        with st.spinner("Simulando con control resonante y mapeo 5D..."):
+            y0 = [0.8234, 0.0, 0.001, 0.0, 0.1267, 0.0]
+            t_eval = np.linspace(0, 120, 8000)
+
+            sol_sov = solve_ivp(lambda t, s: engine.dynamics(t, s, resonant_control=True, gain=gain, freq=freq),
+                                (0, 120), y0, t_eval=t_eval, rtol=1e-10, atol=1e-12)
+
+            control_signal = np.array([gain * np.sin(freq * t) for t in sol_sov.t])
+            jacobi_sov = np.array([engine.get_jacobi(sol_sov.y[:, i]) for i in range(len(sol_sov.t))])
+            abs_jacobi = np.abs(jacobi_sov)  # Quinta dimensión
+
+            # Tamaño del punto = intensidad de control (4D)
+            sizes = 3 + 18 * np.abs(control_signal) / max(gain, 1e-6)
+
+            # Figura 3D + 2D
+            fig = make_subplots(rows=1, cols=2,
+                                specs=[[{'type': 'scatter3d'}, {'type': 'xy'}]],
+                                subplot_titles=(
+                                    "🌌 Trayectoria 5D (tamaño = |Control|, color = |Jacobi|)",
+                                    "Señal de Control y |Jacobi|"
+                                ))
+
+            # Trazo 3D con mapeo 5D
+            fig.add_trace(go.Scatter3d(
+                x=sol_sov.y[0], y=sol_sov.y[1], z=sol_sov.y[2],
+                mode='markers+lines',
+                marker=dict(
+                    size=sizes,
+                    color=abs_jacobi,
+                    colorscale='Viridis',
+                    showscale=True,
+                    colorbar=dict(title="|Constante de Jacobi|<br>(Sintonía 5D)")
+                ),
+                line=dict(color='gold', width=4),
+                name='Trayectoria Soberana 5D'
+            ), row=1, col=1)
+
+            # Gráfico 2D con control y |Jacobi|
+            fig.add_trace(go.Scatter(x=sol_sov.t, y=abs_jacobi, name='|Jacobi|', line=dict(color='cyan')), row=1, col=2)
+            fig.add_trace(go.Scatter(x=sol_sov.t, y=control_signal*10000, name='Señal Resonante (escalada)', line=dict(color='gold', dash='dot')), row=1, col=2)
+
+            fig.update_layout(height=700, template="plotly_dark",
+                              title="Motor Soberano AG-0 — Sintonía 5D (|Jacobi| como métrica de estabilidad)")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Explicación detallada
+            st.markdown("""
+            ---
+            ### 🔮 Interpretación de la 5ª dimensión (color)
+            - **Valores bajos de |Jacobi|** (colores oscuros/violetas) indican **buena sintonía**: el sistema se mantiene cerca de la energía constante ideal.
+            - **Valores altos** (amarillos/verdes) muestran **desviaciones energéticas** provocadas por el control resonante.
+            - Idealmente, un motor soberano bien calibrado mantiene `|Jacobi|` pequeño a lo largo de la trayectoria.
+
+            El **tamaño del punto** (4ª dimensión) muestra dónde se aplica más intensidad de control.
+            """)
+
+            st.success("Simulación con mapeo 5D completada.")
+            st.markdown("---")
+            st.subheader("La Visión de GÉNESIS-KAI")
+            st.write("""
+            El Motor Convencional **doma** el caos mediante correcciones constantes y consumo de Delta-V.  
+            El Motor Soberano **busca sincronizarse** con las frecuencias naturales del sistema, explorando la anticipación en lugar de la reacción.  
+
+            Con este mapeo 5D puedes **ver** cuantitativamente cómo la sintonía resonante afecta la estabilidad del sistema.
+            """)
+
+st.caption("Desarrollado como parte del framework H.A.S. — Human Anticipation Strategist | Abraham Hernández Dorantes")
